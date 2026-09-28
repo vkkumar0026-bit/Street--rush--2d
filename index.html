@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Street Rush 2D</title>
+<script src="https://www.youtube.com/game_api/v1"></script>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#080b10;font-family:Arial,sans-serif}
+canvas{display:block;width:100vw;height:100vh}
+#hud{position:fixed;top:10px;left:10px;right:10px;display:none;justify-content:space-between;color:#fff;font-weight:800;text-shadow:2px 2px 3px #000;pointer-events:none}
+.panel{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:linear-gradient(#0008,#0004)}
+.card{width:min(460px,92vw);padding:25px;border-radius:22px;text-align:center;color:#fff;background:#0b0f16ee;box-shadow:0 15px 50px #000}
+.logo{font-size:42px;font-weight:900;letter-spacing:2px;color:#ffca28;text-shadow:3px 3px 0 #8a6500}
+.sub{opacity:.8;margin:4px 0 16px}
+button{border:0;border-radius:13px;padding:12px 18px;margin:5px;font-weight:800;font-size:16px;background:#ffca28;color:#111;cursor:pointer}
+button:disabled{opacity:.35}.selected{outline:3px solid #ffca28}
+.grid{display:flex;justify-content:center;flex-wrap:wrap}.choice{background:#1b2330;color:#fff}
+.sw{display:inline-block;width:28px;height:45px;border-radius:7px;vertical-align:middle;margin-right:7px}
+.small{font-size:13px;opacity:.75}.controls{position:fixed;bottom:15px;left:0;right:0;display:flex;justify-content:space-between;padding:0 18px;pointer-events:none}
+.ctrl{pointer-events:auto;width:92px;height:62px;background:#ffffff25;color:#fff;border:2px solid #ffffff55;font-size:30px}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"><span id="score">Score:0</span><span id="level">Level:1</span><span id="coins">Coins:0</span><span id="speed">0 km/h</span></div>
+
+<div id="menu" class="panel"><div class="card">
+<div class="logo">STREET RUSH</div><div class="sub">2D RACING • V4</div>
+<div id="cars" class="grid"></div>
+<div id="tracks" class="grid"></div>
+<p class="small">Collect coins to unlock cars. Avoid traffic and survive as long as possible.</p>
+<button id="start">START RACE</button>
+</div></div>
+
+<div id="finish" class="panel" style="display:none"><div class="card">
+<div class="logo" id="endTitle">RACE OVER</div>
+<p id="result"></p>
+<button id="again">RACE AGAIN</button><button id="home">MAIN MENU</button>
+</div></div>
+
+<div class="controls"><button class="ctrl" id="left">◀</button><button class="ctrl" id="right">▶</button></div>
+
+<script>
+const cv=document.getElementById('game'),ctx=cv.getContext('2d');
+let W,H,dpr,RL,RR,running=false,score=0,coins=0,level=1,offset=0,spawn=0,cspawn=35,progress=0;
+let player,traffic=[],coinItems=[],keys={left:false,right:false},selectedCar=0,selectedTrack=0;
+let bank=Number(localStorage.srBank||0),best=Number(localStorage.srBest||0),audio=null,engine=null;
+let ytPaused=false, ytLoaded=false, ytAudioEnabled=true;
+const inYT = typeof ytgame !== "undefined" && !!ytgame.IN_PLAYABLES_ENV;
+async function ytLoadSave(){
+  if(!inYT){ytLoaded=true;return;}
+  try{
+    const raw=await ytgame.game.loadData();
+    if(raw){
+      const s=JSON.parse(raw);
+      bank=Number(s.bank||bank);
+      best=Number(s.best||best);
+    }
+  }catch(e){}
+  ytLoaded=true;
+}
+async function ytSave(){
+  if(!inYT || !ytLoaded)return;
+  try{await ytgame.game.saveData(JSON.stringify({bank,best,version:1}));}catch(e){}
+}
+function ytScore(v){
+  if(!inYT)return;
+  try{ytgame.engagement.sendScore({value:Math.max(0,Math.floor(v))});}catch(e){}
+}
+function setupYT(){
+  if(!inYT)return;
+  try{ytgame.game.firstFrameReady();}catch(e){}
+  try{ytgame.system.onPause(()=>{ytPaused=true;if(engine)engine.frequency.value=60;});}catch(e){}
+  try{ytgame.system.onResume(()=>{ytPaused=false;});}catch(e){}
+  try{
+    ytAudioEnabled=ytgame.system.isAudioEnabled();
+    ytgame.system.onAudioEnabledChange(v=>{ytAudioEnabled=!!v;if(!ytAudioEnabled && engine)engine.frequency.value=60;});
+  }catch(e){}
+  ytLoadSave().then(()=>{try{ytgame.game.gameReady();}catch(e){}});
+}
+
+
+const cars=[
+{name:'Red Rocket',color:'#e53935',cost:0},
+{name:'Blue Bolt',color:'#1e88e5',cost:20},
+{name:'Green Flash',color:'#43a047',cost:45},
+{name:'Purple X',color:'#8e24aa',cost:70},
+{name:'Orange GT',color:'#fb8c00',cost:100}
+];
+const tracks=[
+{name:'CITY',grass:'#24763a',road:'#555'},
+{name:'DESERT',grass:'#bd8c4b',road:'#5b534b'},
+{name:'NIGHT',grass:'#17253d',road:'#30343c'}
+];
+
+function resize(){dpr=devicePixelRatio||1;W=innerWidth;H=innerHeight;cv.width=W*dpr;cv.height=H*dpr;cv.style.width=W+'px';cv.style.height=H+'px';ctx.setTransform(dpr,0,0,dpr,0,0);RL=W*.18;RR=W*.82}
+addEventListener('resize',resize);resize();
+
+function audioStart(){
+ if(!ytAudioEnabled)return;
+ if(!audio){audio=new (window.AudioContext||window.webkitAudioContext)();engine=audio.createOscillator();let gn=audio.createGain();engine.type='sawtooth';gn.gain.value=.014;engine.connect(gn).connect(audio.destination);engine.start()}
+ if(audio.state==='suspended')audio.resume()
+}
+function beep(f,d,v=.05){if(!audio || !ytAudioEnabled)return;let o=audio.createOscillator(),g=audio.createGain();o.type='square';o.frequency.value=f;g.gain.value=v;o.connect(g).connect(audio.destination);o.start();g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+d);o.stop(audio.currentTime+d)}
+
+function drawCar(o,col){
+ ctx.save();ctx.translate(o.x,o.y);
+ ctx.fillStyle='#0005';ctx.fillRect(-o.w/2+4,-o.h/2+6,o.w,o.h);
+ ctx.fillStyle=col;ctx.beginPath();ctx.roundRect(-o.w/2,-o.h/2,o.w,o.h,9);ctx.fill();
+ ctx.fillStyle='#9ee8ff';ctx.fillRect(-o.w*.32,-o.h*.23,o.w*.64,o.h*.24);
+ ctx.fillStyle='#263238';ctx.fillRect(-o.w*.34,o.h*.08,o.w*.68,o.h*.18);
+ ctx.fillStyle='#ffd54f';ctx.fillRect(-o.w*.38,-o.h*.47,7,6);ctx.fillRect(o.w*.2,-o.h*.47,7,6);
+ ctx.restore()
+}
+function draw(){
+ let tr=tracks[selectedTrack],night=selectedTrack===2;
+ ctx.fillStyle=tr.grass;ctx.fillRect(0,0,W,H);
+ ctx.fillStyle=tr.road;ctx.fillRect(RL,0,RR-RL,H);
+ ctx.fillStyle='#eee';ctx.fillRect(RL+7,0,5,H);ctx.fillRect(RR-12,0,5,H);
+ ctx.strokeStyle='#ddd';ctx.lineWidth=5;ctx.setLineDash([38,34]);ctx.lineDashOffset=offset;
+ for(let i=1;i<3;i++){let q=RL+(RR-RL)*i/3;ctx.beginPath();ctx.moveTo(q,0);ctx.lineTo(q,H);ctx.stroke()}
+ ctx.setLineDash([]);
+ traffic.forEach(o=>drawCar(o,o.color));
+ coinItems.forEach(o=>{ctx.fillStyle='#ffd000';ctx.beginPath();ctx.arc(o.x,o.y,10,0,Math.PI*2);ctx.fill();ctx.fillStyle='#fff4a0';ctx.fillRect(o.x-2,o.y-7,4,8)});
+ drawCar(player,cars[selectedCar].color);
+ if(night){ctx.fillStyle='#ffffff';for(let i=0;i<18;i++){let sx=(i*83)%W,sy=(i*47)%Math.max(1,H);ctx.fillRect(sx,sy,2,2)}}
+}
+function hit(a,b){return Math.abs(a.x-b.x)<30&&Math.abs(a.y-b.y)<55}
+function reset(){player={x:W/2,y:H*.78,w:38,h:70};traffic=[];coinItems=[];score=0;coins=0;level=1;offset=0;spawn=10;cspawn=35;progress=0}
+function update(){document.getElementById('score').textContent='Score: '+Math.floor(score);document.getElementById('level').textContent='Level: '+level;document.getElementById('coins').textContent='Coins: '+coins;let sp=7+level*.35+Math.min(7,score/700);document.getElementById('speed').textContent=Math.floor(sp*20)+' km/h';return sp}
+function finish(win){
+ running=false;if(engine)engine.frequency.value=60;beep(win?880:100,.4,.08);
+ best=Math.max(best,Math.floor(score));localStorage.srBest=best;bank+=coins;localStorage.srBank=bank;ytScore(best);ytSave();
+ document.getElementById('hud').style.display='none';document.getElementById('finish').style.display='flex';
+ document.getElementById('endTitle').textContent=win?'LEVEL COMPLETE!':'RACE OVER';
+ document.getElementById('result').innerHTML='Score: <b>'+Math.floor(score)+'</b><br>Coins: <b>'+coins+'</b><br>Best: <b>'+best+'</b><br>Bank: <b>'+bank+'</b>';
+}
+function loop(){
+ if(!running)return;
+ if(ytPaused){requestAnimationFrame(loop);return;}
+ if(keys.left)player.x-=5.5;if(keys.right)player.x+=5.5;
+ player.x=Math.max(RL+32,Math.min(RR-32,player.x));
+ let sp=update();offset=(offset+sp)%72;progress+=sp;
+ spawn--;if(spawn<=0){spawn=28+Math.random()*24;let lane=1+Math.floor(Math.random()*3);traffic.push({x:RL+(RR-RL)*lane/3,y:-80,w:38,h:70,color:cars[1+Math.floor(Math.random()*4)].color,v:sp*(.72+Math.random()*.4)})}
+ cspawn--;if(cspawn<=0){cspawn=50+Math.random()*70;let lane=1+Math.floor(Math.random()*3);coinItems.push({x:RL+(RR-RL)*lane/3,y:-20})}
+ traffic.forEach(o=>o.y+=o.v);traffic=traffic.filter(o=>o.y<H+100);
+ coinItems.forEach(o=>o.y+=sp);coinItems=coinItems.filter(o=>o.y<H+30);
+ for(const o of traffic)if(hit(player,o))return finish(false);
+ coinItems=coinItems.filter(o=>{if(Math.abs(player.x-o.x)<25&&Math.abs(player.y-o.y)<45){coins++;beep(950,.08,.04);return false}return true});
+ if(progress>9000){progress=0;level++;beep(700,.12,.05);if(level%3===0)return finish(true)}
+ if(engine)engine.frequency.value=70+sp*11;
+ draw();requestAnimationFrame(loop)
+}
+function start(){audioStart();reset();running=true;document.getElementById('menu').style.display='none';document.getElementById('finish').style.display='none';document.getElementById('hud').style.display='flex';requestAnimationFrame(loop)}
+function render(){
+ let cc=document.getElementById('cars');cc.innerHTML='';
+ cars.forEach((c,i)=>{let b=document.createElement('button');b.className='choice';let locked=i>0&&bank<c.cost;b.disabled=locked;b.innerHTML='<span class="sw" style="background:'+c.color+'"></span>'+c.name+(c.cost?' '+c.cost+'🪙':'');if(i===selectedCar)b.classList.add('selected');b.onclick=()=>{selectedCar=i;render()};cc.appendChild(b)});
+ let tt=document.getElementById('tracks');tt.innerHTML='';
+ tracks.forEach((t,i)=>{let b=document.createElement('button');b.className='choice';b.textContent=t.name;if(i===selectedTrack)b.classList.add('selected');b.onclick=()=>{selectedTrack=i;render()};tt.appendChild(b)});
+}
+function bind(el,k){['mousedown','touchstart'].forEach(e=>el.addEventListener(e,a=>{a.preventDefault();keys[k]=true}));['mouseup','mouseleave','touchend'].forEach(e=>el.addEventListener(e,a=>{a.preventDefault();keys[k]=false}))}
+bind(document.getElementById('left'),'left');bind(document.getElementById('right'),'right');
+addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key.toLowerCase()==='a')keys.left=true;if(e.key==='ArrowRight'||e.key.toLowerCase()==='d')keys.right=true;if(e.key==='Enter'&&!running)start()});
+addEventListener('keyup',e=>{if(e.key==='ArrowLeft'||e.key.toLowerCase()==='a')keys.left=false;if(e.key==='ArrowRight'||e.key.toLowerCase()==='d')keys.right=false});
+document.getElementById('start').onclick=start;document.getElementById('again').onclick=start;
+document.getElementById('home').onclick=()=>{document.getElementById('finish').style.display='none';document.getElementById('menu').style.display='flex';render()};
+render();reset();draw();setupYT();
+</script>
+</body>
+</html>
